@@ -43,6 +43,11 @@ const errorHandler = (error, req, res, next) => {
 
   if (statusCode >= 500) {
     console.error(error);
+
+    // Do not expose internal error details in production responses.
+    if (process.env.NODE_ENV === 'production') {
+      message = 'Internal server error';
+    }
   }
 
   res.status(statusCode).json({

@@ -3,5 +3,6 @@ dist/
 build/
 .env
 .env.local
+logs/
 *.log
 .DS_Store
