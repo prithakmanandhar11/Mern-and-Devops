@@ -1,5 +1,7 @@
 # Student Management System
 
+[![CI](https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPOSITORY_NAME/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPOSITORY_NAME/actions/workflows/ci.yml)
+
 A complete MERN stack application for managing student records. It includes a REST API built with Express and Mongoose, a React single-page frontend, full create/read/update/delete flows, form validation, confirmation before deletion, and a responsive card/table UI using plain CSS.
 
 ---
@@ -18,18 +20,88 @@ A complete MERN stack application for managing student records. It includes a RE
 
 ## Tech Stack
 
-| Layer      | Technology                                            |
-| ---------- | ----------------------------------------------------- |
-| Frontend   | React 18, Vite, React Router DOM, Axios, plain CSS     |
-| Backend    | Node.js, Express.js, Mongoose                          |
-| Database   | MongoDB Atlas                                          |
-| Config     | dotenv, CORS                                           |
-| Language   | JavaScript (no TypeScript, no Tailwind)               |
+| Layer    | Technology                                         |
+| -------- | -------------------------------------------------- |
+| Frontend | React 18, Vite, React Router DOM, Axios, plain CSS |
+| Backend  | Node.js, Express.js, Mongoose                      |
+| Database | MongoDB Atlas                                      |
+| Config   | dotenv, CORS                                       |
+| CI/CD    | GitHub Actions (Ubuntu runners, Node.js 20)        |
+| Language | JavaScript (no TypeScript, no Tailwind)            |
+
+## CI/CD with GitHub Actions
+
+### What is CI/CD?
+
+**Continuous Integration (CI)** is the practice of automatically installing, checking, and building a project whenever code changes. Every push and pull request is validated in a clean environment, so syntax errors, broken imports, and failed builds are caught before they reach `main`.
+
+**Continuous Delivery/Deployment (CD)** is the next stage: automatically delivering every validated change to a staging or production environment. This project implements CI; the same workflow can be extended later with a deployment job.
+
+### How GitHub Actions works
+
+GitHub Actions is GitHub's built-in automation platform. It reads workflow files from `.github/workflows/` and runs them when their configured events occur.
+
+- **Workflow** — the automation file, `.github/workflows/ci.yml` in this repository.
+- **Event / trigger** — the activity that starts the workflow, such as a push or pull request.
+- **Job** — a group of steps that run on the same runner. This workflow has separate `backend` and `frontend` jobs.
+- **Runner** — a fresh GitHub-hosted Ubuntu virtual machine, discarded after the job.
+- **Step** — an individual command or reusable action. Steps run in order, and a non-zero exit code fails the step and the job.
+- **Action** — a reusable step such as `actions/checkout@v4` or `actions/setup-node@v4`.
+
+### When the workflow is triggered
+
+`.github/workflows/ci.yml` runs when:
+
+| Event        | Condition                                                       |
+| ------------ | --------------------------------------------------------------- |
+| Push         | Any commit is pushed to the `main` branch                       |
+| Pull request | A pull request targeting `main` is opened, reopened, or updated |
+
+Pushes to other branches do not run CI by themselves; open a pull request into `main` to validate them.
+
+### What the workflow checks
+
+| Job        | Runner          | Steps                                                                                                                 |
+| ---------- | --------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `backend`  | `ubuntu-latest` | Checkout, Node.js 20, `npm install`, syntax-check every backend `.js` file, start the Express app and request `GET /` |
+| `frontend` | `ubuntu-latest` | Checkout, Node.js 20, `npm install`, `npm run build`                                                                  |
+
+The backend startup test uses `backend/scripts/ci-start-check.js`. It boots the Express app on an ephemeral port and verifies that the health endpoint responds with HTTP 200. It does not need a database or Docker, so the workflow stays fast and self-contained.
+
+If any command exits with a non-zero status, the step fails, the job fails, and the workflow is marked as failed. GitHub blocks a pull request from merging when the repository's branch protection rules require the `CI` status checks.
+
+### Viewing results
+
+1. Open the **Actions** tab of the GitHub repository.
+2. Select the **CI** workflow and a run to inspect each job and step.
+3. The badge at the top of this README shows the latest result for `main`.
+
+### Badge setup
+
+The badge already points at `.github/workflows/ci.yml`. Before publishing, replace `prithakmanandhar11` and `Mern-and-Devops` in the badge URL with your repository's owner and name.
+
+### Running the same checks locally
+
+```bash
+# Backend
+cd backend
+npm install
+node scripts/ci-start-check.js
+
+# Frontend
+cd ../frontend
+npm install
+npm run build
+```
 
 ## Project Structure
 
 ```text
 student-management-system/
+│
+├── .github/
+│   └── workflows/
+│       └── ci.yml                # GitHub Actions CI workflow
 │
 ├── backend/
 │   ├── config/
@@ -43,11 +115,14 @@ student-management-system/
 │   │   └── Student.js            # Mongoose schema
 │   ├── routes/
 │   │   └── studentRoutes.js      # Express router
+│   ├── scripts/
+│   │   └── ci-start-check.js     # CI startup smoke test
 │   ├── .env
 │   ├── .env.example
 │   ├── .gitignore
+│   ├── app.js                    # Express app (middleware + routes)
 │   ├── package.json
-│   └── server.js                 # App entry point
+│   └── server.js                 # Server entry point (DB + listen)
 │
 ├── frontend/
 │   ├── src/
@@ -139,12 +214,6 @@ Start the backend:
 npm run dev
 ```
 
-or, without nodemon:
-
-```bash
-npm start
-```
-
 You should see:
 
 ```text
@@ -154,12 +223,11 @@ Server running on http://localhost:5000
 
 Quick check: open <http://localhost:5000/api/students> — you should get `{"success":true,"count":0,"data":[]}`.
 
-### Backend scripts
+### Backend command
 
-| Command       | Description                          |
-| ------------- | ------------------------------------ |
-| `npm run dev` | Start with nodemon (auto-restart)    |
-| `npm start`   | Start with plain Node.js             |
+| Command       | Description                       |
+| ------------- | --------------------------------- |
+| `npm run dev` | Start with nodemon (auto-restart) |
 
 ---
 
@@ -190,11 +258,11 @@ Open <http://localhost:5173> in your browser.
 
 ### Frontend scripts
 
-| Command         | Description                          |
-| --------------- | ------------------------------------ |
-| `npm run dev`   | Start the Vite dev server            |
-| `npm run build` | Create a production build in `dist/` |
-| `npm run preview` | Preview the production build       |
+| Command           | Description                          |
+| ----------------- | ------------------------------------ |
+| `npm run dev`     | Start the Vite dev server            |
+| `npm run build`   | Create a production build in `dist/` |
+| `npm run preview` | Preview the production build         |
 
 ---
 
@@ -202,12 +270,14 @@ Open <http://localhost:5173> in your browser.
 
 Two terminals are required:
 
-| Terminal | Directory            | Command       | URL                     |
-| -------- | -------------------- | ------------- | ----------------------- |
-| 1        | `backend/`           | `npm run dev` | http://localhost:5000   |
-| 2        | `frontend/`          | `npm run dev` | http://localhost:5173   |
+| Terminal | Directory   | Command       | URL                   |
+| -------- | ----------- | ------------- | --------------------- |
+| 1        | `backend/`  | `npm run dev` | http://localhost:5000 |
+| 2        | `frontend/` | `npm run dev` | http://localhost:5173 |
 
 The frontend calls the backend using the URL in `frontend/.env`. CORS is enabled on the backend, so no proxy is required.
+
+---
 
 ---
 
@@ -222,9 +292,9 @@ The frontend calls the backend using the URL in `frontend/.env`. CORS is enabled
 
 ### Frontend (`frontend/.env`)
 
-| Variable       | Required | Default                     | Description                 |
-| -------------- | -------- | --------------------------- | --------------------------- |
-| `VITE_API_URL` | No       | `http://localhost:5000/api` | Base URL of the REST API.   |
+| Variable       | Required | Default                     | Description               |
+| -------------- | -------- | --------------------------- | ------------------------- |
+| `VITE_API_URL` | No       | `http://localhost:5000/api` | Base URL of the REST API. |
 
 ---
 
@@ -232,13 +302,13 @@ The frontend calls the backend using the URL in `frontend/.env`. CORS is enabled
 
 Base URL: `http://localhost:5000/api`
 
-| Method   | Endpoint            | Description        | Success Status |
-| -------- | ------------------- | ------------------ | -------------- |
-| `POST`   | `/students`         | Create a student   | `201`          |
-| `GET`    | `/students`         | Get all students   | `200`          |
-| `GET`    | `/students/:id`     | Get one student    | `200`          |
-| `PUT`    | `/students/:id`     | Update a student   | `200`          |
-| `DELETE` | `/students/:id`     | Delete a student   | `200`          |
+| Method   | Endpoint        | Description      | Success Status |
+| -------- | --------------- | ---------------- | -------------- |
+| `POST`   | `/students`     | Create a student | `201`          |
+| `GET`    | `/students`     | Get all students | `200`          |
+| `GET`    | `/students/:id` | Get one student  | `200`          |
+| `PUT`    | `/students/:id` | Update a student | `200`          |
+| `DELETE` | `/students/:id` | Delete a student | `200`          |
 
 Error responses use `400` (validation / invalid id / duplicate email), `404` (student or route not found), or `500` (server error).
 
@@ -312,12 +382,12 @@ Response (`201 Created`):
 
 ## Data Model
 
-| Field      | Type   | Rules                                              |
-| ---------- | ------ | -------------------------------------------------- |
-| `name`     | String | Required, trimmed, max 100 characters              |
-| `email`    | String | Required, unique, lowercase, valid email format    |
-| `course`   | String | Required, trimmed, max 100 characters              |
-| `semester` | Number | Required, whole number from 1 to 12                |
+| Field      | Type   | Rules                                                           |
+| ---------- | ------ | --------------------------------------------------------------- |
+| `name`     | String | Required, trimmed, max 100 characters                           |
+| `email`    | String | Required, unique, lowercase, valid email format                 |
+| `course`   | String | Required, trimmed, max 100 characters                           |
+| `semester` | Number | Required, whole number from 1 to 12                             |
 | `phone`    | String | Required, 7–20 characters (`0-9`, `+`, `-`, space, parentheses) |
 
 `createdAt` and `updatedAt` timestamps are added automatically.
@@ -326,12 +396,12 @@ Response (`201 Created`):
 
 ## Routes (Frontend)
 
-| Path         | Page                                      |
-| ------------ | ----------------------------------------- |
-| `/`          | Students list (table, edit, delete)       |
-| `/add`       | Add Student form                          |
-| `/edit/:id`  | Edit Student form                         |
-| `*`          | 404 Not Found page                        |
+| Path        | Page                                |
+| ----------- | ----------------------------------- |
+| `/`         | Students list (table, edit, delete) |
+| `/add`      | Add Student form                    |
+| `/edit/:id` | Edit Student form                   |
+| `*`         | 404 Not Found page                  |
 
 ---
 

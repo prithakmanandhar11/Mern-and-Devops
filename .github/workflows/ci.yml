@@ -1,0 +1,102 @@
+# GitHub Actions CI for the Student Management System.
+#
+# The workflow runs two independent jobs on GitHub-hosted Ubuntu runners:
+#   - backend: installs dependencies, checks JavaScript syntax, and boots the
+#              Express app for an HTTP smoke test.
+#   - frontend: installs dependencies and creates a production Vite build.
+#
+# GitHub marks the workflow as failed if any step below fails.
+
+name: CI
+
+# Trigger on pushes to main and on pull requests that target main.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+# The workflow only reads repository contents, so no write permissions are needed.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Backend job: syntax check + application startup smoke test
+  # ---------------------------------------------------------------------------
+  backend:
+    name: Backend CI
+    runs-on: ubuntu-latest
+
+    # Run every backend command from the backend directory.
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      # Check out the repository on the runner.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Install Node.js 20 and cache npm downloads using the backend lockfile.
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      # Install backend dependencies exactly as declared in package.json.
+      - name: Install backend dependencies
+        run: npm install
+
+      # Run Node's parser against every backend .js file (node_modules excluded).
+      # A single syntax error makes node --check exit non-zero, which fails the step.
+      - name: Check backend syntax
+        run: |
+          find . -path ./node_modules -prune -o -type f -name '*.js' -print0 \
+            | xargs -0 -n1 node --check
+          echo "Backend syntax check passed."
+
+      # Start the Express app on an ephemeral port and request GET /.
+      # This confirms the app, middleware, and routes load without errors.
+      # No database is required for this smoke test; MongoDB connectivity is
+      # exercised when the API is run locally or deployed.
+      - name: Verify backend application starts
+        run: node scripts/ci-start-check.js
+
+  # ---------------------------------------------------------------------------
+  # Frontend job: dependency install + production build
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend CI
+    runs-on: ubuntu-latest
+
+    # Run every frontend command from the frontend directory.
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      # Check out the repository on the runner.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Install Node.js 20 and cache npm downloads using the frontend lockfile.
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Install frontend dependencies exactly as declared in package.json.
+      - name: Install frontend dependencies
+        run: npm install
+
+      # Compile the React app with Vite. Any import, JSX, or build error fails
+      # the step and therefore the workflow.
+      - name: Build frontend for production
+        run: npm run build
