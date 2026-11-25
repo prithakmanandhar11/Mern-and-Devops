@@ -1,6 +1,6 @@
 # Student Management System
 
-[![CI](https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPOSITORY_NAME/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPOSITORY_NAME/actions/workflows/ci.yml)
+[![Deploy](https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPOSITORY_NAME/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPOSITORY_NAME/actions/workflows/ci.yml)
 
 A complete MERN stack application for managing student records. It includes a REST API built with Express and Mongoose, a React single-page frontend, full create/read/update/delete flows, form validation, confirmation before deletion, and a responsive card/table UI using plain CSS.
 
@@ -36,7 +36,7 @@ A complete MERN stack application for managing student records. It includes a RE
 
 **Continuous Integration (CI)** is the practice of automatically installing, checking, and building a project whenever code changes. Every push and pull request is validated in a clean environment, so syntax errors, broken imports, and failed builds are caught before they reach `main`.
 
-**Continuous Delivery/Deployment (CD)** is the next stage: automatically delivering every validated change to a staging or production environment. This project implements CI; the same workflow can be extended later with a deployment job.
+**Continuous Delivery/Deployment (CD)** is the next stage: automatically delivering every validated change to a staging or production environment. This project implements both: every push is built and checked, then deployed to a single EC2 instance.
 
 ### How GitHub Actions works
 
@@ -44,7 +44,7 @@ GitHub Actions is GitHub's built-in automation platform. It reads workflow files
 
 - **Workflow** — the automation file, `.github/workflows/ci.yml` in this repository.
 - **Event / trigger** — the activity that starts the workflow, such as a push or pull request.
-- **Job** — a group of steps that run on the same runner. This workflow has separate `backend` and `frontend` jobs.
+- **Job** — a group of steps that run on the same runner. This workflow has separate `build` and `deploy` jobs.
 - **Runner** — a fresh GitHub-hosted Ubuntu virtual machine, discarded after the job.
 - **Step** — an individual command or reusable action. Steps run in order, and a non-zero exit code fails the step and the job.
 - **Action** — a reusable step such as `actions/checkout@v4` or `actions/setup-node@v4`.
@@ -53,33 +53,53 @@ GitHub Actions is GitHub's built-in automation platform. It reads workflow files
 
 `.github/workflows/ci.yml` runs when:
 
-| Event        | Condition                                                       |
-| ------------ | --------------------------------------------------------------- |
-| Push         | Any commit is pushed to the `main` branch                       |
-| Pull request | A pull request targeting `main` is opened, reopened, or updated |
+| Event             | Condition                                                                                       |
+| ----------------- | ----------------------------------------------------------------------------------------------- |
+| Push              | A commit is pushed to `main` and touches `backend/`, `frontend/`, `deploy/`, `infra/` or the workflow itself |
+| Pull request      | A pull request targeting `main` is opened, reopened, or updated                                 |
+| Manual run        | **Actions → Deploy MERN app to EC2 → Run workflow** (optional `instance_type` and `ssh_location`) |
 
-Pushes to other branches do not run CI by themselves; open a pull request into `main` to validate them.
+Pushes to other branches do not run the workflow by themselves; open a pull request into `main` to validate them. Pull requests run the `build` job only. The `deploy` job is skipped for pull requests, so nothing is deployed before a change is merged.
 
-### What the workflow checks
+### What the workflow does
 
-| Job        | Runner          | Steps                                                                                                                 |
-| ---------- | --------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `backend`  | `ubuntu-latest` | Checkout, Node.js 20, `npm install`, syntax-check every backend `.js` file, start the Express app and request `GET /` |
-| `frontend` | `ubuntu-latest` | Checkout, Node.js 20, `npm install`, `npm run build`                                                                  |
+| Job      | Runner          | Steps                                                                                                                                                                                                 |
+| -------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `build`  | `ubuntu-latest` | Checkout, Node.js 22, `npm ci` in `backend/` and `frontend/`, syntax-check every backend `.js` file, run the backend startup smoke test, `npm run build` in `frontend/`, upload `frontend/dist` as an artifact |
+| `deploy` | `ubuntu-latest` | Checkout, configure AWS credentials (including the session token), validate the CloudFormation template, create/update the stack, fetch the SSH key from SSM, copy the backend and frontend to the instance, write `backend/.env` from secrets, install production dependencies, start/reload PM2, configure Nginx, and check the site and API respond |
 
 The backend startup test uses `backend/scripts/ci-start-check.js`. It boots the Express app on an ephemeral port and verifies that the health endpoint responds with HTTP 200. It does not need a database or Docker, so the workflow stays fast and self-contained.
 
+Infrastructure is defined in `infra/ec2-instance.yaml`. The stack creates an Ubuntu 24.04 instance with Node.js 22, PM2 and Nginx pre-installed, plus a key pair, a security group (22/80/443) and an Elastic IP so the public address stays the same across restarts.
+
 If any command exits with a non-zero status, the step fails, the job fails, and the workflow is marked as failed. GitHub blocks a pull request from merging when the repository's branch protection rules require the `CI` status checks.
+
+### Required GitHub secrets
+
+Add these under **Settings → Secrets and variables → Actions → New repository secret**:
+
+| Secret                  | Value                                                                 |
+| ----------------------- | --------------------------------------------------------------------- |
+| `AWS_ACCESS_KEY_ID`     | AWS Academy **Access key ID**                                          |
+| `AWS_SECRET_ACCESS_KEY` | AWS Academy **Secret access key**                                      |
+| `AWS_SESSION_TOKEN`     | AWS Academy **Session token** (temporary credentials always need it)   |
+| `MONGODB_URI`           | MongoDB Atlas connection string including `/studentdb`                 |
+| `CLIENT_ORIGIN`         | Optional. Only set it if the frontend is served from a different origin |
+
+AWS Academy credentials expire after a few hours, so refresh the three AWS secrets before starting a run.
+
+After the first deploy, copy the **Elastic IP** from the run summary into **MongoDB Atlas → Network Access**. Without that entry the API cannot reach the database.
 
 ### Viewing results
 
 1. Open the **Actions** tab of the GitHub repository.
-2. Select the **CI** workflow and a run to inspect each job and step.
-3. The badge at the top of this README shows the latest result for `main`.
+2. Select the **Deploy MERN app to EC2** workflow and a run to inspect each job and step.
+3. The run summary contains the live URL and the CloudFormation outputs.
+4. The badge at the top of this README shows the latest result for `main`.
 
 ### Badge setup
 
-The badge already points at `.github/workflows/ci.yml`. Before publishing, replace `prithakmanandhar11` and `Mern-and-Devops` in the badge URL with your repository's owner and name.
+The badge already points at `.github/workflows/ci.yml`. Before publishing, replace `YOUR_GITHUB_USERNAME` and `YOUR_REPOSITORY_NAME` in the badge URL with your repository's owner and name.
 
 ### Running the same checks locally
 
@@ -95,7 +115,7 @@ npm install
 npm run build
 ```
 
-> **Deployment is manual:** the workflow validates code only; it does not deploy to EC2. After a green CI run, follow the [AWS EC2 deployment guide](#deploying-to-aws-ec2-ubuntu-no-docker). The workflow file is unchanged by the deployment setup.
+> **Deployment is automatic:** every push to `main` that passes the build job deploys to the EC2 instance created by `infra/ec2-instance.yaml`. The [manual EC2 guide](#deploying-to-aws-ec2-ubuntu-no-docker) below is kept as a fallback for deploying without CloudFormation or GitHub Actions.
 
 ## Project Structure
 
@@ -104,7 +124,10 @@ student-management-system/
 │
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                # GitHub Actions CI workflow
+│       └── ci.yml                # GitHub Actions build + deploy workflow
+│
+├── infra/
+│   └── ec2-instance.yaml         # CloudFormation: EC2, key pair, security group, Elastic IP
 │
 ├── backend/
 │   ├── config/
@@ -313,7 +336,7 @@ Nginx (ports 80 / 443)
                       MongoDB Atlas
 ```
 
-Nginx serves the React production build and proxies API requests to the Express server. PM2 keeps the backend running and restarts it automatically. The GitHub Actions workflow remains CI-only; deployment is performed manually with the steps below.
+Nginx serves the React production build and proxies API requests to the Express server. PM2 keeps the backend running and restarts it automatically. The GitHub Actions workflow normally does all of this automatically; use the steps below only if you want to deploy by hand.
 
 ### 1. Launch the EC2 instance
 

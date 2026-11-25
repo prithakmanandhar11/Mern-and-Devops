@@ -1,102 +1,322 @@
-# GitHub Actions CI for the Student Management System.
+# GitHub Actions: build the MERN app and deploy it to a single EC2 instance.
 #
-# The workflow runs two independent jobs on GitHub-hosted Ubuntu runners:
-#   - backend: installs dependencies, checks JavaScript syntax, and boots the
-#              Express app for an HTTP smoke test.
-#   - frontend: installs dependencies and creates a production Vite build.
+# Flow (same pattern as the reference deploy.yml):
+#   push to main / manual run
+#     ├─ build  : install backend + frontend deps, check the backend, build the
+#     │           React app, upload frontend/dist as an artifact.
+#     └─ deploy : create/update the CloudFormation stack (EC2 + key pair +
+#                 security group + Elastic IP), copy the backend and the built
+#                 frontend to the instance, write backend/.env from secrets,
+#                 install production deps, start PM2, configure Nginx, and
+#                 verify the site and API respond.
 #
-# GitHub marks the workflow as failed if any step below fails.
+# Pull requests only run the build job, so broken code is caught before merge.
+#
+# Required repository secrets:
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN  (AWS Academy)
+#   MONGODB_URI                                                   (Atlas)
+# Optional:
+#   CLIENT_ORIGIN  (only if the frontend is served from another origin)
+#
+# After the first deploy, add the instance's Elastic IP (shown in the run
+# summary) to MongoDB Atlas Network Access, then re-run the workflow.
 
-name: CI
+name: Deploy MERN app to EC2
 
-# Trigger on pushes to main and on pull requests that target main.
-on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+on: # Events that start the workflow
+  push: # Run when code is pushed
+    branches: [main] # Only pushes to main
+    paths: # Only when one of these files changes
+      - "backend/**" # Express API
+      - "frontend/**" # React app
+      - "deploy/**" # Nginx configuration
+      - "infra/**" # CloudFormation template
+      - ".github/workflows/ci.yml" # This workflow file
+  pull_request: # Validate pull requests without deploying
+    branches: [main]
+  workflow_dispatch: # Allow running it manually from the Actions tab
+    inputs: # Options shown when running manually
+      instance_type: # Input name
+        description: EC2 instance type # Label shown in the UI
+        default: t2.micro # Pre-selected value
+        type: choice # Shown as a dropdown
+        options: [t2.micro, t2.small, t2.medium, t3.micro, t3.small, t3.medium]
+      ssh_location: # Input name
+        description: CIDR allowed to SSH (use your-ip/32) # Label shown in the UI
+        default: 0.0.0.0/0 # GitHub runners do not have fixed IPs
+        type: string # Free-text value
 
-# The workflow only reads repository contents, so no write permissions are needed.
+# Only one deploy at a time per branch; a new push waits for the running one.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+# The workflow only reads repository contents; AWS auth uses repository secrets.
 permissions:
   contents: read
 
-jobs:
-  # ---------------------------------------------------------------------------
-  # Backend job: syntax check + application startup smoke test
-  # ---------------------------------------------------------------------------
-  backend:
-    name: Backend CI
-    runs-on: ubuntu-latest
+env: # Variables available to every step
+  AWS_REGION: us-east-1 # AWS region to deploy in (change if your sandbox uses another)
+  STACK_NAME: student-management-stack # Name of the CloudFormation stack
+  TEMPLATE: infra/ec2-instance.yaml # Path to the CloudFormation template
+  APP_DIR: /var/www/student-management-system # Directory on the EC2 instance
 
-    # Run every backend command from the backend directory.
-    defaults:
-      run:
-        working-directory: backend
+jobs: # Jobs in this workflow
+  build: # Job 1: build the React app and check the backend (no AWS access needed)
+    name: Build and check
+    runs-on: ubuntu-latest # Run on a GitHub-hosted Ubuntu machine
+    timeout-minutes: 15 # Stop a stuck install or build
+    steps: # Steps run in order
+      - uses: actions/checkout@v4 # Download the repo onto the runner
 
-    steps:
-      # Check out the repository on the runner.
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # Install Node.js 20 and cache npm downloads using the backend lockfile.
-      - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4 # Install Node.js on the runner
         with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
+          node-version: "22" # Node.js version used to build and check
+          cache: npm # Reuse downloaded packages between runs (faster)
+          cache-dependency-path: | # Cache both lockfiles
+            backend/package-lock.json
+            frontend/package-lock.json
 
-      # Install backend dependencies exactly as declared in package.json.
       - name: Install backend dependencies
-        run: npm install
+        working-directory: backend
+        run: npm ci # Install exact versions from backend/package-lock.json
 
-      # Run Node's parser against every backend .js file (node_modules excluded).
-      # A single syntax error makes node --check exit non-zero, which fails the step.
       - name: Check backend syntax
+        working-directory: backend
         run: |
+          # Fail the step if any backend .js file has a syntax error.
           find . -path ./node_modules -prune -o -type f -name '*.js' -print0 \
             | xargs -0 -n1 node --check
           echo "Backend syntax check passed."
 
-      # Start the Express app on an ephemeral port and request GET /.
-      # This confirms the app, middleware, and routes load without errors.
-      # No database is required for this smoke test; MongoDB connectivity is
-      # exercised when the API is run locally or deployed.
-      - name: Verify backend application starts
-        run: node scripts/ci-start-check.js
+      - name: Verify backend starts
+        working-directory: backend
+        run: node scripts/ci-start-check.js # Boots the app without a database
 
-  # ---------------------------------------------------------------------------
-  # Frontend job: dependency install + production build
-  # ---------------------------------------------------------------------------
-  frontend:
-    name: Frontend CI
-    runs-on: ubuntu-latest
-
-    # Run every frontend command from the frontend directory.
-    defaults:
-      run:
-        working-directory: frontend
-
-    steps:
-      # Check out the repository on the runner.
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # Install Node.js 20 and cache npm downloads using the frontend lockfile.
-      - name: Set up Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      # Install frontend dependencies exactly as declared in package.json.
       - name: Install frontend dependencies
-        run: npm install
+        working-directory: frontend
+        run: npm ci # Install exact versions from frontend/package-lock.json
 
-      # Compile the React app with Vite. Any import, JSX, or build error fails
-      # the step and therefore the workflow.
-      - name: Build frontend for production
-        run: npm run build
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build # Vite builds into frontend/dist
+
+      - uses: actions/upload-artifact@v4 # Save the build for the deploy job
+        with:
+          name: frontend-dist # Artifact name
+          path: frontend/dist/ # Folder to save
+          retention-days: 7 # Delete the artifact after a week
+
+  deploy: # Job 2: create/update the EC2 stack and copy the app to it
+    name: Deploy to EC2
+    needs: build # Only runs if the build succeeded
+    if: github.event_name != 'pull_request' # Never deploy from a pull request
+    runs-on: ubuntu-latest # Run on a GitHub-hosted Ubuntu machine
+    timeout-minutes: 30 # Stop a stuck deploy
+    env: # Variables for this job only
+      SSH_OPTS: -i ec2-key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR # Use the key file, skip the host prompt, fail fast on a dead host
+    steps: # Steps run in order
+      - uses: actions/checkout@v4 # Download the repo (needed for the template and backend)
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4 # Official AWS action that sets up CLI credentials
+        with: # Inputs for the action
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }} # AWS Academy access key
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }} # AWS Academy secret key
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }} # AWS Academy session token
+          aws-region: ${{ env.AWS_REGION }} # Region from the env block
+
+      - name: Validate CloudFormation template
+        run: aws cloudformation validate-template --template-body file://${{ env.TEMPLATE }} # Check the template before deploying
+
+      - name: Deploy CloudFormation stack
+        run: | # Create the stack, or update it if it already exists
+          args=(
+            --stack-name "$STACK_NAME"
+            --template-file "$TEMPLATE"
+            --parameter-overrides
+              InstanceType="${{ inputs.instance_type || 't2.micro' }}"
+              SSHLocation="${{ inputs.ssh_location || '0.0.0.0/0' }}"
+            --no-fail-on-empty-changeset # Do not fail when nothing changed
+          )
+          aws cloudformation deploy "${args[@]}"
+
+      - name: Find instance and public IP
+        id: instance # Lets later steps read this step's outputs
+        run: |
+          # Read one CloudFormation output by name.
+          output() {
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+
+          INSTANCE_ID=$(output InstanceId) # EC2 instance created by the stack
+          KEY_ID=$(output KeyPairId) # Needed to fetch the private key from SSM
+
+          STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+            --query "Reservations[0].Instances[0].State.Name" --output text)
+          echo "Instance $INSTANCE_ID is $STATE"
+
+          # Let a stop finish, then start the instance if the sandbox stopped it.
+          if [ "$STATE" = "stopping" ]; then
+            aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID"
+            STATE=stopped
+          fi
+          if [ "$STATE" = "stopped" ]; then
+            aws ec2 start-instances --instance-ids "$INSTANCE_ID" > /dev/null
+          fi
+          aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+
+          IP=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+            --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+          echo "ip=$IP" >> "$GITHUB_OUTPUT" # Share the IP with later steps
+          echo "key_id=$KEY_ID" >> "$GITHUB_OUTPUT" # Share the key pair ID with later steps
+
+      - name: Get SSH key from SSM
+        run: |
+          # CloudFormation stores the private key at /ec2/keypair/<KeyPairId>.
+          aws ssm get-parameter \
+            --name "/ec2/keypair/${{ steps.instance.outputs.key_id }}" \
+            --with-decryption \
+            --query Parameter.Value \
+            --output text > ec2-key.pem
+          chmod 600 ec2-key.pem # ssh refuses keys that other users can read
+
+      - name: Wait for SSH and first-boot setup
+        env: # Variables for this step
+          IP: ${{ steps.instance.outputs.ip }} # Instance IP from the earlier step
+        run: |
+          # Try for up to ~5 minutes (a new instance needs time to boot).
+          ready=0
+          for i in $(seq 1 30); do
+            if ssh $SSH_OPTS ubuntu@"$IP" true; then
+              ready=1
+              break
+            fi
+            echo "SSH not ready yet ($i/30), retrying in 10s..."
+            sleep 10
+          done
+
+          if [ "$ready" -ne 1 ]; then
+            echo "::error::Could not SSH to $IP after 5 minutes. Check the security group and the instance state."
+            exit 1
+          fi
+
+          status=0 # Exit code of cloud-init (0 = done, 1 = failed, 2 = done with warnings)
+          ssh $SSH_OPTS ubuntu@"$IP" 'cloud-init status --wait' || status=$?
+          if [ "$status" -eq 1 ]; then
+            echo "::error::UserData failed on the instance. Last lines of its log:"
+            ssh $SSH_OPTS ubuntu@"$IP" 'sudo tail -n 40 /var/log/cloud-init-output.log'
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4 # Get the build from the build job
+        with:
+          name: frontend-dist # Artifact name used in the build job
+          path: frontend/dist # Where to put it
+
+      - name: Copy application to EC2
+        env:
+          IP: ${{ steps.instance.outputs.ip }}
+        run: |
+          # Pack the backend source, the built frontend and the Nginx config.
+          tar -czf app.tar.gz \
+            --exclude='backend/node_modules' \
+            --exclude='backend/.env' \
+            --exclude='backend/logs' \
+            backend frontend/dist deploy/nginx
+          scp $SSH_OPTS app.tar.gz ubuntu@"$IP":/tmp/app.tar.gz
+          # Replace the previous release so stale files cannot linger.
+          ssh $SSH_OPTS ubuntu@"$IP" "APP_DIR='$APP_DIR' bash -s" <<'EOF'
+          set -euo pipefail
+          if [ -z "${APP_DIR:-}" ] || [ "$APP_DIR" = "/" ]; then
+            echo "Refusing to use APP_DIR=$APP_DIR"
+            exit 1
+          fi
+          sudo mkdir -p "$APP_DIR"
+          sudo chown -R ubuntu:ubuntu "$APP_DIR"
+          rm -rf "$APP_DIR/backend" "$APP_DIR/frontend" "$APP_DIR/deploy"
+          tar -xzf /tmp/app.tar.gz -C "$APP_DIR"
+          rm -f /tmp/app.tar.gz
+          EOF
+
+      - name: Configure backend environment
+        env:
+          IP: ${{ steps.instance.outputs.ip }}
+          MONGODB_URI: ${{ secrets.MONGODB_URI }} # Atlas connection string
+          CLIENT_ORIGIN: ${{ secrets.CLIENT_ORIGIN }} # Optional CORS origin
+        run: |
+          # Write .env on the runner, copy it over SSH, then delete it locally.
+          umask 077
+          {
+            echo "NODE_ENV=production"
+            echo "PORT=5000"
+            echo "HOST=127.0.0.1"
+            printf 'MONGODB_URI=%s\n' "$MONGODB_URI"
+            if [ -n "${CLIENT_ORIGIN:-}" ]; then
+              printf 'CLIENT_ORIGIN=%s\n' "$CLIENT_ORIGIN"
+            fi
+          } > backend.env
+          scp $SSH_OPTS backend.env ubuntu@"$IP":/tmp/backend.env
+          ssh $SSH_OPTS ubuntu@"$IP" "mv /tmp/backend.env $APP_DIR/backend/.env && chmod 600 $APP_DIR/backend/.env"
+
+      - name: Install backend dependencies and start PM2
+        env:
+          IP: ${{ steps.instance.outputs.ip }}
+        run: |
+          ssh $SSH_OPTS ubuntu@"$IP" "APP_DIR='$APP_DIR' bash -s" <<'EOF'
+          set -euo pipefail
+          export PATH="/usr/local/bin:$PATH"
+          if [ -z "${APP_DIR:-}" ] || [ "$APP_DIR" = "/" ]; then
+            echo "Refusing to use APP_DIR=$APP_DIR"
+            exit 1
+          fi
+          cd "$APP_DIR/backend"
+          npm ci --omit=dev # Production dependencies only
+          mkdir -p logs
+          pm2 startOrReload ecosystem.config.js --update-env # Start or reload the API
+          pm2 save # Persist the process list
+          sudo env PATH="$PATH:/usr/local/bin" pm2 startup systemd -u ubuntu --hp /home/ubuntu > /dev/null || true
+          EOF
+
+      - name: Configure Nginx
+        env:
+          IP: ${{ steps.instance.outputs.ip }}
+        run: |
+          # Serve frontend/dist and proxy /api/ to the Express server on :5000.
+          ssh $SSH_OPTS ubuntu@"$IP" "sudo cp $APP_DIR/deploy/nginx/student-management-system.conf /etc/nginx/sites-available/student-management-system && sudo ln -sfn /etc/nginx/sites-available/student-management-system /etc/nginx/sites-enabled/student-management-system && sudo rm -f /etc/nginx/sites-enabled/default && sudo nginx -t && sudo systemctl enable --now nginx && sudo systemctl reload nginx"
+
+      - name: Check the site and API are live
+        env:
+          IP: ${{ steps.instance.outputs.ip }}
+        run: |
+          # The React entry point must contain the root div.
+          curl -fsS --retry 10 --retry-delay 3 "http://$IP/" | grep -q 'id="root"'
+          # The API must answer through the Nginx proxy.
+          if ! curl -fsS --retry 10 --retry-delay 3 "http://$IP/api/students" > /dev/null; then
+            echo "::error::The API did not respond. Most often the Elastic IP ($IP) is missing from MongoDB Atlas Network Access."
+            curl -sS "http://$IP/api/students" || true
+            exit 1
+          fi
+          echo "Frontend and API responded successfully."
+
+      - name: Show outputs
+        if: always() && steps.instance.outcome == 'success' # Show the URL even when the API check failed
+        run: |
+          {
+            echo "### Live at http://${{ steps.instance.outputs.ip }}"
+            echo
+            echo "If the API check failed, add this Elastic IP to MongoDB Atlas Network Access, then re-run:"
+            echo
+            echo '```'
+            echo "${{ steps.instance.outputs.ip }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs" --output table | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up credentials
+        if: always() # Run even if an earlier step failed
+        run: rm -f ec2-key.pem backend.env app.tar.gz # Do not leave secrets or keys on the runner
